@@ -12,13 +12,25 @@ import {
   Scale,
   Utensils,
   Award,
-  Clock
+  Clock,
+  Edit
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { getMealEntries, addMealEntry } from '../services/trackingApi';
 
 const Dashboard: React.FC = () => {
   const [waterAmount, setWaterAmount] = useState(250); // ml
   const [weightInput, setWeightInput] = useState('');
+  const [showManualMealLogger, setShowManualMealLogger] = useState(false);
+  const [manualMealData, setManualMealData] = useState({
+    recipe_title: '',
+    meal_type: 'lunch' as 'breakfast' | 'lunch' | 'dinner' | 'snack',
+    calories: 0,
+    protein: 0,
+    carbs: 0,
+    fat: 0,
+    quantity: 1
+  });
   const queryClient = useQueryClient();
 
   // Simple data fetching with error handling
@@ -40,15 +52,16 @@ const Dashboard: React.FC = () => {
         // Try to fetch data, but handle errors gracefully
         const today = new Date().toISOString().split('T')[0];
         
-        const [userGoalsResult, dailyLogResult] = await Promise.allSettled([
+        const [userGoalsResult, dailyLogResult, todaysMealsResult] = await Promise.allSettled([
           supabase.from('user_goals').select('*').eq('user_id', user.id).single(),
-          supabase.from('daily_logs').select('*').eq('user_id', user.id).eq('date', today).single()
+          supabase.from('daily_logs').select('*').eq('user_id', user.id).eq('date', today).single(),
+          getMealEntries(today)
         ]);
 
         return {
           userGoals: userGoalsResult.status === 'fulfilled' ? userGoalsResult.value.data : null,
           dailyLog: dailyLogResult.status === 'fulfilled' ? dailyLogResult.value.data : null,
-          todaysMeals: [],
+          todaysMeals: todaysMealsResult.status === 'fulfilled' ? todaysMealsResult.value : [],
           recentWeight: [],
           waterLogs: []
         };
@@ -108,6 +121,22 @@ const Dashboard: React.FC = () => {
     },
   });
 
+  const addManualMealMutation = useMutation({
+    mutationFn: addMealEntry,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboardData'] });
+      setShowManualMealLogger(false);
+      setManualMealData({
+        recipe_title: '',
+        meal_type: 'lunch',
+        calories: 0,
+        protein: 0,
+        carbs: 0,
+        fat: 0,
+        quantity: 1
+      });
+    },
+  });
   const handleAddWater = () => {
     addWaterMutation.mutate(waterAmount);
   };
@@ -119,6 +148,24 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  const handleManualMealSubmit = () => {
+    if (!manualMealData.recipe_title.trim()) {
+      alert('Please enter a meal name');
+      return;
+    }
+    
+    addManualMealMutation.mutate({
+      date: new Date().toISOString().split('T')[0],
+      meal_type: manualMealData.meal_type,
+      recipe_id: `manual-${Date.now()}`,
+      recipe_title: manualMealData.recipe_title,
+      quantity: manualMealData.quantity,
+      calories: Math.round(manualMealData.calories * manualMealData.quantity),
+      protein: Math.round(manualMealData.protein * manualMealData.quantity),
+      carbs: Math.round(manualMealData.carbs * manualMealData.quantity),
+      fat: Math.round(manualMealData.fat * manualMealData.quantity),
+    });
+  };
   if (error) {
     return (
       <div className="container mx-auto px-4 py-8">
@@ -180,11 +227,22 @@ const Dashboard: React.FC = () => {
     fat: dailyLog?.total_fat || 0
   };
 
+  // Group meals by type
+  const mealsByType = todaysMeals?.reduce((acc, meal) => {
+    if (!acc[meal.meal_type]) {
+      acc[meal.meal_type] = [];
+    }
+    acc[meal.meal_type].push(meal);
+    return acc;
+  }, {} as Record<string, typeof todaysMeals>) || {};
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-800 mb-2">Dashboard</h1>
         <p className="text-gray-600">Track your daily nutrition and health goals</p>
+        <p className="text-sm text-gray-500 mt-1">
+          Data resets daily at midnight. Today: {new Date().toLocaleDateString()}
+        </p>
       </div>
 
       {/* Quick Stats Cards */}
@@ -329,6 +387,21 @@ const Dashboard: React.FC = () => {
               </div>
             </div>
           </div>
+          <div className="space-y-2 mb-4">
+            {Object.entries(mealsByType).map(([mealType, meals]) => (
+              <div key={mealType} className="flex justify-between text-sm">
+                <span className="capitalize text-gray-600">{mealType}:</span>
+                <span className="font-medium">{meals.length} meal{meals.length !== 1 ? 's' : ''}</span>
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={() => setShowManualMealLogger(true)}
+            className="w-full bg-green-500 text-white px-3 py-2 rounded text-sm hover:bg-green-600 transition-colors flex items-center justify-center"
+          >
+            <Edit className="w-4 h-4 mr-2" />
+            Log Manual Meal
+          </button>
           <div className="text-center py-4">
             <p className="text-gray-600 text-sm">Start logging meals to see your progress</p>
           </div>
@@ -361,6 +434,24 @@ const Dashboard: React.FC = () => {
               <div className="text-sm text-gray-600">Fat</div>
             </div>
           </div>
+          
+          {/* Today's Meals List */}
+          {todaysMeals && todaysMeals.length > 0 && (
+            <div className="mt-6">
+              <h3 className="font-semibold text-gray-800 mb-3">Today's Meals</h3>
+              <div className="space-y-2 max-h-40 overflow-y-auto">
+                {todaysMeals.map((meal) => (
+                  <div key={meal.id} className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                    <div>
+                      <span className="font-medium text-sm">{meal.recipe_title}</span>
+                      <span className="text-xs text-gray-500 ml-2 capitalize">({meal.meal_type})</span>
+                    </div>
+                    <span className="text-sm text-orange-600 font-medium">{meal.calories} kcal</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </motion.div>
 
         <motion.div
@@ -425,6 +516,157 @@ const Dashboard: React.FC = () => {
         </motion.div>
       )}
     </div>
+      {/* Manual Meal Logger Modal */}
+      {showManualMealLogger && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <motion.div
+            className="bg-white rounded-lg max-w-md w-full p-6"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.3 }}
+          >
+            <h3 className="text-xl font-semibold mb-4">Log Manual Meal</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Meal Name*
+                </label>
+                <input
+                  type="text"
+                  value={manualMealData.recipe_title}
+                  onChange={(e) => setManualMealData({...manualMealData, recipe_title: e.target.value})}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                  placeholder="e.g., Grilled Chicken Salad"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Meal Type
+                </label>
+                <select
+                  value={manualMealData.meal_type}
+                  onChange={(e) => setManualMealData({...manualMealData, meal_type: e.target.value as any})}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                >
+                  <option value="breakfast">Breakfast</option>
+                  <option value="lunch">Lunch</option>
+                  <option value="dinner">Dinner</option>
+                  <option value="snack">Snack</option>
+                </select>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Quantity
+                  </label>
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    value={manualMealData.quantity}
+                    onChange={(e) => setManualMealData({...manualMealData, quantity: parseFloat(e.target.value)})}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Calories (per serving)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={manualMealData.calories}
+                    onChange={(e) => setManualMealData({...manualMealData, calories: parseInt(e.target.value)})}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                  />
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Protein (g)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={manualMealData.protein}
+                    onChange={(e) => setManualMealData({...manualMealData, protein: parseInt(e.target.value)})}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Carbs (g)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={manualMealData.carbs}
+                    onChange={(e) => setManualMealData({...manualMealData, carbs: parseInt(e.target.value)})}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Fat (g)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={manualMealData.fat}
+                    onChange={(e) => setManualMealData({...manualMealData, fat: parseInt(e.target.value)})}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500"
+                  />
+                </div>
+              </div>
+              
+              {/* Nutrition Preview */}
+              <div className="bg-gray-50 p-3 rounded-lg">
+                <h4 className="font-medium text-gray-800 mb-2">Total Nutrition (×{manualMealData.quantity})</h4>
+                <div className="grid grid-cols-4 gap-2 text-sm">
+                  <div className="text-center">
+                    <div className="font-bold text-orange-600">{Math.round(manualMealData.calories * manualMealData.quantity)}</div>
+                    <div className="text-gray-600">kcal</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="font-bold text-green-600">{Math.round(manualMealData.protein * manualMealData.quantity)}g</div>
+                    <div className="text-gray-600">protein</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="font-bold text-yellow-600">{Math.round(manualMealData.carbs * manualMealData.quantity)}g</div>
+                    <div className="text-gray-600">carbs</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="font-bold text-red-600">{Math.round(manualMealData.fat * manualMealData.quantity)}g</div>
+                    <div className="text-gray-600">fat</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="flex space-x-3 mt-6">
+              <button
+                onClick={() => setShowManualMealLogger(false)}
+                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleManualMealSubmit}
+                disabled={addManualMealMutation.isPending || !manualMealData.recipe_title.trim()}
+                className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50"
+              >
+                {addManualMealMutation.isPending ? 'Logging...' : 'Log Meal'}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
   );
 };
 
